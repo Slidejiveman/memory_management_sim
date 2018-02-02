@@ -25,7 +25,6 @@ typedef struct _node
 typedef struct _doubly_linked_queue
 {
     node *head, *tail, *current;
-    int length;
 } doubly_linked_queue;
 
 /* function prototypes */
@@ -39,12 +38,13 @@ void *allocate();
 void *collect();
 void *traverse();
 void *increment_times();
+node *split_node();
 
 /* global variables */
 pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
 doubly_linked_queue *AVAILABLE_MEMORY = NULL;
 doubly_linked_queue *ALLOCATED_MEMORY = NULL;
-int i, rc;
+int i, rc;                                       // i is the number of nodes. rc is return code for errors.
 
 /* methods */
 
@@ -87,7 +87,8 @@ int main(int argc, char *argv[])
     return EXIT_SUCCESS;
 }
 
-// Creates a doubly-linked queue with initialized nodes
+// Creates a doubly-linked queue with initialized nodes for available memory
+// allocated memory starts out empty, but this method creates both queues
 void init_queues()
 {
     AVAILABLE_MEMORY = (doubly_linked_queue*) malloc(sizeof(doubly_linked_queue));
@@ -106,11 +107,11 @@ void init_queues()
     }
 }
 
-// Initialize a new node
+// Initialize a new node during program startup for available memory
 void init_node(node *new_node, int i)
 {
     new_node->ptid = i;
-    new_node->nBase = i * BLOCK_SIZE; // not exactly right
+    new_node->nBase = i * BLOCK_SIZE; // 0 -> BLOCKSIZE - 1 for each initial node
     new_node->nStay = 0;
     new_node->nBlocks = BLOCK_SIZE;   
 }
@@ -125,8 +126,8 @@ void enqueue(doubly_linked_queue *memory, node *new_node)
     }
     else 
         memory->head = new_node;
-    memory->tail = new_node; 
-
+    memory->tail = new_node;
+   
 #ifdef DEBUG
     printf("queue tail ptid: %d queue head ptid: %d\n", memory->tail->ptid, memory->head->ptid);
 #endif
@@ -141,23 +142,50 @@ bool is_empty(doubly_linked_queue *memory)
 
 // removes the memory node from its location in one queue
 // and replaces it at the end of the other queue
-void requeue(doubly_linked_queue *memory, node *a_node)
+void requeue(doubly_linked_queue *target, doubly_linked_queue *source, node *a_node)
 {
-    node *previous = a_node->prev;
-    node *next = a_node->next;
-    previous->next = next;
-    next->prev = previous;
-    enqueue(memory, a_node);
+    if (source->head == a_node) 
+        source->head = a_node->next;
+    else if (source->tail == a_node)
+        source->tail = a_node->prev; 
+    else // standard case
+    {
+        node *previous = a_node->prev;
+        node *next = a_node->next;
+        previous->next = next;
+        next->prev = previous;
+    }
+    enqueue(target, a_node);
 }
 
 // removes a node from a memory queue and returns it
-node *dequeue(doubly_linked_queue *memory, node *a_node)
+node *dequeue(doubly_linked_queue *source, node *a_node)
 {
-    node *previous = a_node->prev;
-    node *next = a_node->next;
-    previous->next = next;
-    next->prev = previous;
+    if (source->head == a_node)
+        source->head = a_node->next;
+    else if (source->tail == a_node)
+        source->tail = a_node->prev;
+    else // standard case
+    {
+        node *previous = a_node->prev;
+        node *next = a_node->next;
+        previous->next = next;
+        next->prev = previous;
+    }
     return a_node;
+}
+
+// splits a node to allocate a smaller amount of memory
+// thus minimizing waste.
+node *split_node(node *a_node, int blocks)
+{
+    a_node->nBlocks   = a_node->nBlocks - blocks;
+    node *new_node    = (node*) malloc(sizeof(node));
+    new_node->ptid    = ++i;                           // i is global, never reset to 0
+    new_node->nBase   = a_node->nBlocks - blocks;      // base starts at the last index of original node's
+    new_node->nStay   = 0;                             // 0 because only just now allocated
+    new_node->nBlocks = blocks;                        // blocks to allocate was passed into this function
+    return new_node;
 }
 
 /* thread methods */
@@ -172,28 +200,67 @@ node *dequeue(doubly_linked_queue *memory, node *a_node)
 // memory queue.
 void *allocate()
 {
+#ifdef DEBUG
+    printf("******** IN ALLOCATION ROUTINE ******** \n\n");
+#endif
     while(true) 
     {
+        if (!is_empty(AVAILABLE_MEMORY))
+        {
 #ifdef DEBUG
-        printf("\n==== Allocating Memory ====\n");
+            printf("\n==== Allocating Memory ====\n");
 #endif
-        pthread_mutex_lock(&mutex);
-        pthread_mutex_unlock(&mutex);       
-        sleep(1);
+            int blocks_to_allocate = rand() % 41 + 10; // 10 - 50 blocks
+            pthread_mutex_lock(&mutex);
+            AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->head;
+            while (AVAILABLE_MEMORY->current != AVAILABLE_MEMORY->tail) // looking via "First Fit" method
+            {
+                if (AVAILABLE_MEMORY->current->nBlocks > blocks_to_allocate)
+                {
+                    // we can allocate blocks from this node, but is the node too large?
+                    if (AVAILABLE_MEMORY->current->nBlocks > blocks_to_allocate * 2)
+                    {
+                        // split the node by decrementing its nBlocks and creating a new node
+                        // with the difference. Add the new node to the allocated queue
+                        node* new_node = split_node(AVAILABLE_MEMORY->current, blocks_to_allocate); 
+                        enqueue(ALLOCATED_MEMORY, new_node);
+                    } 
+                    else // allocate the current node by moving it to the allocated queue
+                        requeue(ALLOCATED_MEMORY, AVAILABLE_MEMORY,AVAILABLE_MEMORY->current);
+                    
+                    // exit the loop after a fit is found.
+                    AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->tail;    
+                }
+                else // we cannot allocate blocks from this node 
+                    AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->current->next;
+            }
+            pthread_mutex_unlock(&mutex);       
+            sleep(1);
+        }
     }
     return EXIT_SUCCESS;
 }
 
 // Garbage collects an allocated node and move is back to the available queue
+// Chooses whichever node has the highest stay value. This should be the head.
+// Bonus: try to combine adjacent freed nodes back together and if one has
+// nBlocks of < than some value, free the memory
 void *collect()
 {
+#ifdef DEBUG
+    printf("******** IN COLLECTION ROUTINE ******** \n\n");
+#endif
     while(true)
     {
+        if (!is_empty(ALLOCATED_MEMORY))
+        {
 #ifdef DEBUG
-        printf("\n==== Garbage Collecting ====\n");
+            printf("\n==== Garbage Collecting ====\n");
 #endif
-        pthread_mutex_lock(&mutex);
-        pthread_mutex_unlock(&mutex);
+            pthread_mutex_lock(&mutex);
+            requeue(AVAILABLE_MEMORY, ALLOCATED_MEMORY, ALLOCATED_MEMORY->head); // the head should have highest stay
+            pthread_mutex_unlock(&mutex);
+        }
         sleep(2);
     }
     return EXIT_SUCCESS;
@@ -202,9 +269,12 @@ void *collect()
 // traverses through the queues starting at the head. Print out info.
 void *traverse()
 {
+#ifdef DEBUG
+    printf("******** IN TRAVERSE ROUTINE ********\n\n");
+#endif
     while(true) 
     {
-        if (AVAILABLE_MEMORY != NULL && !is_empty(AVAILABLE_MEMORY))
+        if (!is_empty(AVAILABLE_MEMORY))
         {
 #ifdef DEBUG
             printf("\n==== Traversing Available Memory ====\n");
@@ -213,15 +283,16 @@ void *traverse()
             AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->head;
             while(AVAILABLE_MEMORY->current != AVAILABLE_MEMORY->tail)
             {
-                printf("Current node: %d\n", AVAILABLE_MEMORY->current->ptid);
+                printf("Current node: %d nBase: %d nStay %d nBlocks %d\n", AVAILABLE_MEMORY->current->ptid, AVAILABLE_MEMORY->current->nBase, AVAILABLE_MEMORY->current->nStay, AVAILABLE_MEMORY->current->nBlocks);
                 AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->current->next;
             }
-            printf("Current node: %d\n", AVAILABLE_MEMORY->tail->ptid); // must print the tail too 
+            printf("Current node: %d nBase: %d nStay %d nBlocks %d\n", AVAILABLE_MEMORY->tail->ptid, AVAILABLE_MEMORY->tail->nBase, AVAILABLE_MEMORY->tail->nStay, AVAILABLE_MEMORY->tail->nBlocks); // must print the tail too 
             pthread_mutex_unlock(&mutex);
         }
-        else
-            printf("AVAILABLE_MEMORY IS EMPTY\n");
 
+        // Releasing lock before checking allocated memory because no memory may be allocated.
+        // This also gives other threads the chance to go when checking to see if there is 
+        // allocated memory.
         if (ALLOCATED_MEMORY != NULL && !is_empty(ALLOCATED_MEMORY))
         {
 #ifdef DEBUG
@@ -231,14 +302,12 @@ void *traverse()
             ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->head;
             while(ALLOCATED_MEMORY->current != ALLOCATED_MEMORY->tail)
             {
-                printf("Current node: %d\n", ALLOCATED_MEMORY->current->ptid);
+                printf("Current node: %d nBase: %d nStay: %d nBlocks: %d\n", ALLOCATED_MEMORY->current->ptid, ALLOCATED_MEMORY->current->nBase, ALLOCATED_MEMORY->current->nStay, ALLOCATED_MEMORY->current->nBlocks);
                 ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->current->next;
             }
-            printf("Current node: %d\n", ALLOCATED_MEMORY->tail->ptid); // must print the tail too 
+            printf("Current node: %d nBase: %d nStay: %d nBlocks: %d\n", ALLOCATED_MEMORY->tail->ptid, ALLOCATED_MEMORY->tail->nBase, ALLOCATED_MEMORY->tail->nStay, ALLOCATED_MEMORY->tail->nBlocks); // must print the tail too 
             pthread_mutex_unlock(&mutex);
         } 
-        else
-            printf("ALLOCATED MEMORY IS EMPTY.\n");
         sleep(5);
     }
     return EXIT_SUCCESS;
@@ -247,10 +316,29 @@ void *traverse()
 // increments the nStay value of each node in the allocated queue
 void *increment_times()
 {
+#ifdef DEBUG
+    printf("******** IN INCREMENT TIMES ROUTINE ********\n\n");
+#endif
     while(true)
     {
         // if the allocated_memory isn't empty, increment all of the
         // nodes' stay value
+        if (!is_empty(ALLOCATED_MEMORY))
+        {
+#ifdef DEBUG
+            printf("\n==== Incrementing Allocated Memory Stay Values  ====\n");
+#endif
+            pthread_mutex_lock(&mutex);
+            ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->head;
+            while (ALLOCATED_MEMORY->current != ALLOCATED_MEMORY->tail)
+            {
+                ALLOCATED_MEMORY->current->nStay++;
+                ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->current->next;
+            }
+            ALLOCATED_MEMORY->tail->nStay++; // handle the tail
+            pthread_mutex_unlock(&mutex);
+        }
+        sleep(1);
     }
     return EXIT_SUCCESS;
 }
