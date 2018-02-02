@@ -39,6 +39,7 @@ void *collect();
 void *traverse();
 void *increment_times();
 node *split_node();
+void merge_nodes();
 
 /* global variables */
 pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
@@ -77,7 +78,7 @@ int main(int argc, char *argv[])
     {
         fprintf(stderr, "error: timer thread creation, rc: %d\n", rc);
     }
-
+    
     // block for thread completion before exiting
     pthread_join(allocator, NULL);
     pthread_join(collector, NULL);
@@ -112,7 +113,7 @@ void init_node(node *new_node, int i)
 {
     new_node->ptid = i;
     new_node->nBase = i * BLOCK_SIZE; // 0 -> BLOCKSIZE - 1 for each initial node
-    new_node->nStay = 0;
+    new_node->nStay = 0;              // 0 since the memory hasn't been allocated at all yet.
     new_node->nBlocks = BLOCK_SIZE;   
 }
 
@@ -188,6 +189,64 @@ node *split_node(node *a_node, int blocks)
     return new_node;
 }
 
+// merge adjacent nodes that have been returned to available memory:
+// if a node is found that doesn't have a maximum number of blocks,
+// find some nodes that can return their blocks to it without exceeding
+// the maximum number of blocks
+void merge_nodes()
+{
+  
+    doubly_linked_queue *temp = (doubly_linked_queue*) malloc(sizeof(doubly_linked_queue));
+    node *freeable_node;
+
+    // find all eligible nodes in available memory for deallocation
+    // the ones that are found will all be in a single block of memory
+    // All should be stored in the high range first.
+    // Ignore the head. If it is still in the AVAILABLE_MEMORY pool, then it
+    // is still large enough to be subdivided into other nodes. Just give blocks
+    // back to it.
+    pthread_mutex_lock(&mutex);
+    AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->head->next;
+    pthread_mutex_unlock(&mutex);
+    while (AVAILABLE_MEMORY->current != AVAILABLE_MEMORY->tail)
+    {
+        if (AVAILABLE_MEMORY->current->nBlocks < BLOCK_SIZE)
+        {
+            freeable_node = AVAILABLE_MEMORY->current;
+            pthread_mutex_lock(&mutex);
+            AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->current->next;
+            AVAILABLE_MEMORY->head->nBlocks += freeable_node->nBlocks;
+            requeue(temp, AVAILABLE_MEMORY, freeable_node);
+            pthread_mutex_unlock(&mutex);
+        }
+        if (AVAILABLE_MEMORY->tail->nBlocks < BLOCK_SIZE) // handle tail separately
+        {
+            freeable_node = AVAILABLE_MEMORY->tail;
+            pthread_mutex_lock(&mutex);
+            AVAILABLE_MEMORY->head->nBlocks += freeable_node->nBlocks;
+            requeue(temp, AVAILABLE_MEMORY, freeable_node);
+            pthread_mutex_unlock(&mutex);
+        }
+    }
+
+    // now go through the temporary queue and add the blocks from the nodes
+    // to the head node of the AVAILABLE_MEMORY. Then, free the nodes and queue.
+   /* printf("temp->head->ptid %d temp->tail->ptid %d\n", temp->head->ptid, temp->tail->ptid);
+    printf("AVAILABLE_MEMORY->head->ptid %d\n", AVAILABLE_MEMORY->head->ptid);
+    temp->current = temp->head;
+    while (temp->current != temp->tail)
+    {
+        printf("I'm in the temp->current while traversal....\n");
+        AVAILABLE_MEMORY->head->nBlocks += temp->current->nBlocks;
+        freeable_node = temp->current;
+        temp->current = temp->current->next;
+        free(freeable_node);
+    }
+    AVAILABLE_MEMORY->tail->nBlocks += temp->head->nBlocks;
+    free(temp->tail);
+    free(temp);*/
+}
+
 /* thread methods */
 // select a node from the available queue to allocate
 // based a randomly generated number. The number should
@@ -213,6 +272,7 @@ void *allocate()
             int blocks_to_allocate = rand() % 41 + 10; // 10 - 50 blocks
             pthread_mutex_lock(&mutex);
             AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->head;
+            pthread_mutex_unlock(&mutex);
             while (AVAILABLE_MEMORY->current != AVAILABLE_MEMORY->tail) // looking via "First Fit" method
             {
                 if (AVAILABLE_MEMORY->current->nBlocks > blocks_to_allocate)
@@ -222,19 +282,29 @@ void *allocate()
                     {
                         // split the node by decrementing its nBlocks and creating a new node
                         // with the difference. Add the new node to the allocated queue
+                        pthread_mutex_lock(&mutex);
                         node* new_node = split_node(AVAILABLE_MEMORY->current, blocks_to_allocate); 
                         enqueue(ALLOCATED_MEMORY, new_node);
+                        pthread_mutex_unlock(&mutex);
                     } 
-                    else // allocate the current node by moving it to the allocated queue
-                        requeue(ALLOCATED_MEMORY, AVAILABLE_MEMORY,AVAILABLE_MEMORY->current);
-                    
+                    else
+                    {    // allocate the current node by moving it to the allocated queue
+                         pthread_mutex_lock(&mutex);
+                         requeue(ALLOCATED_MEMORY, AVAILABLE_MEMORY,AVAILABLE_MEMORY->current);
+                         pthread_mutex_unlock(&mutex);
+                    }
                     // exit the loop after a fit is found.
+                    pthread_mutex_lock(&mutex);
                     AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->tail;    
+                    pthread_mutex_unlock(&mutex);
                 }
                 else // we cannot allocate blocks from this node 
+                {
+                    pthread_mutex_lock(&mutex);
                     AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->current->next;
-            }
-            pthread_mutex_unlock(&mutex);       
+                    pthread_mutex_unlock(&mutex);
+                }
+            }       
             sleep(1);
         }
     }
@@ -244,7 +314,7 @@ void *allocate()
 // Garbage collects an allocated node and move is back to the available queue
 // Chooses whichever node has the highest stay value. This should be the head.
 // Bonus: try to combine adjacent freed nodes back together and if one has
-// nBlocks of < than some value, free the memory
+// nBlocks of than some value, free the memory
 void *collect()
 {
 #ifdef DEBUG
@@ -258,8 +328,10 @@ void *collect()
             printf("\n==== Garbage Collecting ====\n");
 #endif
             pthread_mutex_lock(&mutex);
+            ALLOCATED_MEMORY->head->nStay = 0;                                   // deallocate and clear timer
             requeue(AVAILABLE_MEMORY, ALLOCATED_MEMORY, ALLOCATED_MEMORY->head); // the head should have highest stay
             pthread_mutex_unlock(&mutex);
+            merge_nodes();                                                       // merge free nodes
         }
         sleep(2);
     }
