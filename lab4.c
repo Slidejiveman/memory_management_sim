@@ -41,6 +41,7 @@ void *traverse();
 void *increment_times();
 node *split_node();
 void merge_nodes();
+void compact();
 
 /* global variables */
 pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
@@ -233,6 +234,33 @@ void merge_nodes()
     }
 }
 
+// compacts memory segments after nodes have been merged.
+// this will change the base values of the allocated memory
+// nodes based on the merger of unallocated memory into a
+// single available memory node.
+void compact() 
+{
+    node *temp_node;
+    // based on the available memory's head's base and limit
+    // registers, update the allocated memory's base and limit
+    // registers. The updates occur tail first because memory 
+    // is allocated sequentially starting at the highest memory
+    // offset.
+    pthread_mutex_lock(&mutex);
+    ALLOCATED_MEMORY->tail->nBase = AVAILABLE_MEMORY->head->nBlocks + 1; // offset the tail first as it is a special case
+    ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->tail;
+    pthread_mutex_unlock(&mutex);
+    while (ALLOCATED_MEMORY->current != ALLOCATED_MEMORY->head)
+    {
+        temp_node = ALLOCATED_MEMORY->current;
+        pthread_mutex_lock(&mutex);
+        ALLOCATED_MEMORY->current = ALLOCATED_MEMORY->current->prev;     // traversing backwards
+        ALLOCATED_MEMORY->current->nBase = temp_node->nBase + temp_node->nBlocks + 1; // base + limit + 1
+        pthread_mutex_unlock(&mutex);
+    }
+    
+}
+
 /* thread methods */
 // select a node from the available queue to allocate
 // based a randomly generated number. The number should
@@ -318,7 +346,10 @@ void *collect()
             requeue(AVAILABLE_MEMORY, ALLOCATED_MEMORY, ALLOCATED_MEMORY->head); // the head should have highest stay
             pthread_mutex_unlock(&mutex);
             if (AVAILABLE_MEMORY->length > NUM_NODES * 3)
-                merge_nodes();                                                   // merge free nodes
+            {
+                merge_nodes();                                                   // merge free nodes in available memory
+                compact();                                                       // recalculate memory offsets
+            }
         }
         sleep(2);
     }
