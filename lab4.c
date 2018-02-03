@@ -112,8 +112,9 @@ void init_queues()
 void init_node(node *new_node, int i)
 {
     new_node->ptid = i;
-    new_node->nBase = i * BLOCK_SIZE; // 0 -> BLOCKSIZE - 1 for each initial node
-    new_node->nStay = 0;              // 0 since the memory hasn't been allocated at all yet.
+    new_node->nBase = i * BLOCK_SIZE - 1; // 0 -> BLOCKSIZE - 1 for each initial node
+    if (new_node->nBase == -1) new_node->nBase = 0;
+    new_node->nStay = 0;                  // 0 since the memory hasn't been allocated at all yet.
     new_node->nBlocks = BLOCK_SIZE;   
 }
 
@@ -195,9 +196,8 @@ node *split_node(node *a_node, int blocks)
 // the maximum number of blocks
 void merge_nodes()
 {
-  
     doubly_linked_queue *temp = (doubly_linked_queue*) malloc(sizeof(doubly_linked_queue));
-    node *freeable_node;
+    node *temp_node;
 
     // find all eligible nodes in available memory for deallocation
     // the ones that are found will all be in a single block of memory
@@ -212,39 +212,22 @@ void merge_nodes()
     {
         if (AVAILABLE_MEMORY->current->nBlocks < BLOCK_SIZE)
         {
-            freeable_node = AVAILABLE_MEMORY->current;
+            temp_node = AVAILABLE_MEMORY->current;
             pthread_mutex_lock(&mutex);
             AVAILABLE_MEMORY->current = AVAILABLE_MEMORY->current->next;
-            AVAILABLE_MEMORY->head->nBlocks += freeable_node->nBlocks;
-            requeue(temp, AVAILABLE_MEMORY, freeable_node);
+            AVAILABLE_MEMORY->head->nBlocks += temp_node->nBlocks;
+            requeue(temp, AVAILABLE_MEMORY, temp_node);
             pthread_mutex_unlock(&mutex);
         }
         if (AVAILABLE_MEMORY->tail->nBlocks < BLOCK_SIZE) // handle tail separately
         {
-            freeable_node = AVAILABLE_MEMORY->tail;
+            temp_node = AVAILABLE_MEMORY->tail;
             pthread_mutex_lock(&mutex);
-            AVAILABLE_MEMORY->head->nBlocks += freeable_node->nBlocks;
-            requeue(temp, AVAILABLE_MEMORY, freeable_node);
+            AVAILABLE_MEMORY->head->nBlocks += temp_node->nBlocks;
+            requeue(temp, AVAILABLE_MEMORY, temp_node);
             pthread_mutex_unlock(&mutex);
         }
     }
-
-    // now go through the temporary queue and add the blocks from the nodes
-    // to the head node of the AVAILABLE_MEMORY. Then, free the nodes and queue.
-   /* printf("temp->head->ptid %d temp->tail->ptid %d\n", temp->head->ptid, temp->tail->ptid);
-    printf("AVAILABLE_MEMORY->head->ptid %d\n", AVAILABLE_MEMORY->head->ptid);
-    temp->current = temp->head;
-    while (temp->current != temp->tail)
-    {
-        printf("I'm in the temp->current while traversal....\n");
-        AVAILABLE_MEMORY->head->nBlocks += temp->current->nBlocks;
-        freeable_node = temp->current;
-        temp->current = temp->current->next;
-        free(freeable_node);
-    }
-    AVAILABLE_MEMORY->tail->nBlocks += temp->head->nBlocks;
-    free(temp->tail);
-    free(temp);*/
 }
 
 /* thread methods */
