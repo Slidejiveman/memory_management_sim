@@ -82,11 +82,15 @@ int main(int argc, char *argv[])
     }
     
     // block for thread completion before exiting
-    pthread_join(allocator, NULL);
-    pthread_join(collector, NULL);
-    pthread_join(traverser, NULL);
-    pthread_join(timer, NULL);
-
+    // I would use this code if I needed to join the threads.
+    // pthread_join(allocator, NULL);
+    // pthread_join(collector, NULL);
+    // pthread_join(traverser, NULL);
+    // pthread_join(timer, NULL);
+    
+    // run the simulation for a minute, then exit.
+    // all threads will be terminated when main returns.
+    sleep(60);
     return EXIT_SUCCESS;
 }
 
@@ -232,6 +236,7 @@ void merge_nodes()
             pthread_mutex_unlock(&mutex);
         }
     }
+    free(temp); // free allocated temp queue 
 }
 
 // compacts memory segments after nodes have been merged.
