@@ -25,6 +25,7 @@ typedef struct _node
 typedef struct _doubly_linked_queue
 {
     node *head, *tail, *current;
+    int length;
 } doubly_linked_queue;
 
 /* function prototypes */
@@ -129,7 +130,7 @@ void enqueue(doubly_linked_queue *memory, node *new_node)
     else 
         memory->head = new_node;
     memory->tail = new_node;
-   
+    memory->length++;
 #ifdef DEBUG
     printf("queue tail ptid: %d queue head ptid: %d\n", memory->tail->ptid, memory->head->ptid);
 #endif
@@ -157,6 +158,7 @@ void requeue(doubly_linked_queue *target, doubly_linked_queue *source, node *a_n
         previous->next = next;
         next->prev = previous;
     }
+    source->length--;
     enqueue(target, a_node);
 }
 
@@ -174,6 +176,7 @@ node *dequeue(doubly_linked_queue *source, node *a_node)
         previous->next = next;
         next->prev = previous;
     }
+    source->length--;
     return a_node;
 }
 
@@ -314,7 +317,8 @@ void *collect()
             ALLOCATED_MEMORY->head->nStay = 0;                                   // deallocate and clear timer
             requeue(AVAILABLE_MEMORY, ALLOCATED_MEMORY, ALLOCATED_MEMORY->head); // the head should have highest stay
             pthread_mutex_unlock(&mutex);
-            merge_nodes();                                                       // merge free nodes
+            if (AVAILABLE_MEMORY->length > NUM_NODES * 3)
+                merge_nodes();                                                   // merge free nodes
         }
         sleep(2);
     }
